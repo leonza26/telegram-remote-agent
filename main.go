@@ -163,6 +163,14 @@ func isDestructivePrompt(prompt string) (bool, string) {
 	return false, ""
 }
 
+// isTopicAllowed memeriksa apakah pesan berasal dari Topik (message_thread_id) yang sesuai
+func isTopicAllowed(msgTopicID int, configuredTopicID int) bool {
+	if configuredTopicID <= 0 {
+		return true
+	}
+	return msgTopicID == configuredTopicID
+}
+
 // ============================================================================
 // STRUKTUR DATA TELEGRAM API
 // ============================================================================
@@ -178,13 +186,14 @@ type TelegramUpdate struct {
 }
 
 type TelegramMessage struct {
-	MessageID int               `json:"message_id"`
-	From      *TelegramUser     `json:"from"`
-	Chat      TelegramChat      `json:"chat"`
-	Date      int64             `json:"date"`
-	Text      string            `json:"text"`
-	Caption   string            `json:"caption"`
-	Document  *TelegramDocument `json:"document"`
+	MessageID       int               `json:"message_id"`
+	MessageThreadID int               `json:"message_thread_id"`
+	From            *TelegramUser     `json:"from"`
+	Chat            TelegramChat      `json:"chat"`
+	Date            int64             `json:"date"`
+	Text            string            `json:"text"`
+	Caption         string            `json:"caption"`
+	Document        *TelegramDocument `json:"document"`
 }
 
 type TelegramUser struct {
@@ -218,6 +227,7 @@ type TelegramFileResponse struct {
 type BotApp struct {
 	botToken      string
 	allowedChatID int64
+	topicID       int
 	session       *SessionManager
 	currentDir    string
 	allowedRoots  []string
@@ -233,6 +243,10 @@ func main() {
 
 	botToken := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
 	chatIDStr := strings.TrimSpace(os.Getenv("TELEGRAM_ALLOWED_CHAT_ID"))
+	if chatIDStr == "" {
+		chatIDStr = strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID"))
+	}
+	topicID, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("TELEGRAM_TOPIC_ID")))
 	pin := strings.TrimSpace(os.Getenv("AGENT_PIN"))
 	if pin == "" {
 		pin = "8899"
@@ -281,6 +295,7 @@ func main() {
 	app := &BotApp{
 		botToken:      botToken,
 		allowedChatID: allowedChatID,
+		topicID:       topicID,
 		session:       NewSessionManager(pin, time.Duration(timeoutMin)*time.Minute),
 		currentDir:    defaultDir,
 		allowedRoots:  allowedRoots,
@@ -289,10 +304,11 @@ func main() {
 		logFile:       filepath.Join(exeDir, "agent-activity.log"),
 	}
 
-	app.writeLog("🚀 Telegram Remote Agent dimulai. Folder kerja awal: %s", app.currentDir)
+	app.writeLog("🚀 Telegram Remote Agent dimulai. Folder kerja awal: %s (TopicID: %d)", app.currentDir, app.topicID)
 	fmt.Println("==================================================================")
 	fmt.Println("🤖 TELEGRAM REMOTE AGENT AKTIF & SIAP MENERIMA PERINTAH")
 	fmt.Println("==================================================================")
+	fmt.Printf("💬 Chat ID Grup   : %d (Topik ID: %d)\n", app.allowedChatID, app.topicID)
 	fmt.Printf("📂 Folder Aktif   : %s\n", app.currentDir)
 	fmt.Printf("🛡️ Allowed Roots  : %s\n", strings.Join(app.allowedRoots, " | "))
 	fmt.Printf("⏱️ Auto-Lock PIN  : %d Menit\n", timeoutMin)
@@ -302,17 +318,19 @@ func main() {
 	// 1. Buang pesan lama yang tertunda saat laptop mati (Keamanan Anti-Perintah Basi)
 	offset := app.flushPendingUpdates()
 
-	// 2. Kirim pesan sapaan saat laptop menyala
-	startupMsg := fmt.Sprintf(
-		"🟢 <b>Laptop Menyala — Remote Agent Siap!</b>\n"+
-			"━━━━━━━━━━━━━━━━━━━━━━\n"+
-			"🔒 <b>Status Sesi:</b> <code>TERKUNCI (LOCKED)</code>\n"+
-			"📂 <b>Folder Aktif:</b> <code>%s</code>\n\n"+
-			"💡 Ketik <code>/unlock &lt;PIN&gt;</code> untuk membuka kunci sesi selama %d menit.\n"+
-			"<i>(Pesan PIN Anda akan otomatis dihapus dari layar chat demi keamanan).</i>",
-		escapeHTML(app.currentDir), timeoutMin,
-	)
-	_ = app.sendMessage(app.allowedChatID, startupMsg)
+	// 2. Kirim pesan sapaan saat laptop menyala (jika topicID sudah diketahui atau di chat pribadi)
+	if app.topicID > 0 || app.allowedChatID > 0 {
+		startupMsg := fmt.Sprintf(
+			"🟢 <b>Laptop Menyala — Remote Agent Siap!</b>\n"+
+				"━━━━━━━━━━━━━━━━━━━━━━\n"+
+				"🔒 <b>Status Sesi:</b> <code>TERKUNCI (LOCKED)</code>\n"+
+				"📂 <b>Folder Aktif:</b> <code>%s</code>\n\n"+
+				"💡 Ketik <code>/unlock &lt;PIN&gt;</code> untuk membuka kunci sesi selama %d menit.\n"+
+				"<i>(Pesan PIN Anda akan otomatis dihapus dari layar chat demi keamanan).</i>",
+			escapeHTML(app.currentDir), timeoutMin,
+		)
+		_ = app.sendMessage(app.allowedChatID, startupMsg)
+	}
 
 	// 3. Jalankan Long-Polling Loop
 	for {
@@ -335,17 +353,30 @@ func main() {
 func (app *BotApp) handleMessage(msg *TelegramMessage) {
 	now := time.Now()
 
-	// LAPIS KEAMANAN 0: Whitelist Chat ID (Hanya pemilik asli yang dilayani)
+	// LAPIS KEAMANAN 0: Whitelist Chat ID (Hanya grup/chat milik pemilik asli yang dilayani)
 	if msg.Chat.ID != app.allowedChatID {
 		app.writeLog("⛔ Percobaan akses ditolak dari ChatID asing: %d (User: %v)", msg.Chat.ID, msg.From)
-		_ = app.sendMessage(msg.Chat.ID, "⛔ <b>Akses Ditolak.</b> Bot ini dikunci khusus untuk pemilik laptop.")
 		return
+	}
+
+	// FILTER TOPIK SUPERGROUP (Agar terpisah rapi dari topik # Leon Git Notif)
+	if !isTopicAllowed(msg.MessageThreadID, app.topicID) {
+		return
+	}
+
+	// AUTO-DETECT TOPIK ID: Jika TELEGRAM_TOPIC_ID di .env masih kosong dan Anda chat di topik "💻 Remote Agent",
+	// maka bot otomatis mengunci dirinya ke Topik ID tersebut dan menyimpannya ke file .env!
+	if app.topicID == 0 && msg.MessageThreadID > 0 {
+		app.topicID = msg.MessageThreadID
+		app.saveTopicIDToEnv(app.topicID)
+		app.writeLog("📌 Otomatis mengunci TELEGRAM_TOPIC_ID ke: %d", app.topicID)
 	}
 
 	text := strings.TrimSpace(msg.Text)
 	if text == "" && msg.Caption != "" {
 		text = strings.TrimSpace(msg.Caption)
 	}
+	text = stripBotMentionInCommand(text)
 
 	// LAPIS KEAMANAN 1: Perintah /unlock <PIN> + Auto-Delete Pesan PIN dari Chat Telegram
 	if strings.HasPrefix(strings.ToLower(text), "/unlock") {
@@ -884,6 +915,9 @@ func (app *BotApp) sendMessage(chatID int64, text string) error {
 		"parse_mode":               "HTML",
 		"disable_web_page_preview": true,
 	}
+	if app.topicID > 0 {
+		payload["message_thread_id"] = app.topicID
+	}
 	body, _ := json.Marshal(payload)
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewBuffer(body))
@@ -921,6 +955,9 @@ func (app *BotApp) sendDocument(chatID int64, filePath string, caption string) e
 	writer := multipart.NewWriter(&body)
 
 	_ = writer.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+	if app.topicID > 0 {
+		_ = writer.WriteField("message_thread_id", strconv.Itoa(app.topicID))
+	}
 	if caption != "" {
 		_ = writer.WriteField("caption", caption)
 	}
@@ -1089,4 +1126,43 @@ func formatByteSize(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// stripBotMentionInCommand mengubah "/ls@NamaBot arg" menjadi "/ls arg" saat di grup
+func stripBotMentionInCommand(text string) string {
+	if !strings.HasPrefix(text, "/") {
+		return text
+	}
+	parts := strings.SplitN(text, " ", 2)
+	cmdPart := parts[0]
+	if atIdx := strings.Index(cmdPart, "@"); atIdx != -1 {
+		cmdPart = cmdPart[:atIdx]
+	}
+	if len(parts) == 2 {
+		return cmdPart + " " + parts[1]
+	}
+	return cmdPart
+}
+
+// saveTopicIDToEnv menyimpan TELEGRAM_TOPIC_ID yang terdeteksi otomatis ke file .env
+func (app *BotApp) saveTopicIDToEnv(topicID int) {
+	envPath := filepath.Join(app.exeDir, ".env")
+	contentBytes, err := os.ReadFile(envPath)
+	if err != nil {
+		return
+	}
+	content := string(contentBytes)
+	newLine := fmt.Sprintf("TELEGRAM_TOPIC_ID=%d", topicID)
+	if strings.Contains(content, "TELEGRAM_TOPIC_ID=") {
+		lines := strings.Split(content, "\n")
+		for i, l := range lines {
+			if strings.HasPrefix(strings.TrimSpace(l), "TELEGRAM_TOPIC_ID=") {
+				lines[i] = newLine
+			}
+		}
+		content = strings.Join(lines, "\n")
+	} else {
+		content = strings.TrimRight(content, "\r\n") + "\n" + newLine + "\n"
+	}
+	_ = os.WriteFile(envPath, []byte(content), 0644)
 }

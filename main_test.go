@@ -99,3 +99,23 @@ func TestIsDestructivePrompt(t *testing.T) {
 		}
 	}
 }
+
+func TestIsTopicAllowed(t *testing.T) {
+	// Jika configuredTopicID == 0 (belum dikunci), izinkan pesan masuk untuk auto-detect
+	if !isTopicAllowed(12, 0) {
+		t.Errorf("expected topic 12 to be allowed when configuredTopicID is 0")
+	}
+
+	// Jika configuredTopicID sudah dikunci ke topik Remote Agent (misal ID 12),
+	// maka pesan di topik General (0) atau topik lain (99) harus diabaikan
+	if !isTopicAllowed(12, 12) {
+		t.Errorf("expected matching topic 12 to be allowed")
+	}
+	if isTopicAllowed(0, 12) {
+		t.Errorf("expected general topic (0) to be ignored when locked to topic 12")
+	}
+	if isTopicAllowed(99, 12) {
+		t.Errorf("expected other topic (99) to be ignored when locked to topic 12")
+	}
+}
+
