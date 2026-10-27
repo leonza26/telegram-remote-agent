@@ -1,0 +1,56 @@
+# ============================================================================
+# Cara Pakai untuk Repo Kolaborasi (Multi-User di GitHub):
+# 1. Copy file ini ke dalam folder `.github/workflows/git-notif.yml` di repo GitHub Anda.
+# 2. Buka repo di GitHub -> Settings -> Secrets and variables -> Actions -> New repository secret:
+#    - Buat secret `TELEGRAM_BOT_TOKEN` = isi dengan token bot Anda
+#    - Buat secret `TELEGRAM_CHAT_ID`   = isi dengan angka Chat ID grup Anda
+# 3. Selesai! Setiap kali kolaborator mana pun melakukan PUSH, buka PR, atau MERGE,
+#    username GitHub mereka otomatis muncul di grup Telegram Anda!
+# ============================================================================
+
+name: Git Telegram Notification
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    types: [ opened, closed, reopened ]
+
+jobs:
+  notify-telegram:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kirim Notifikasi ke Grup Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          REPO_NAME: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          COMPARE_URL: ${{ github.event.compare }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ "$PR_ACTION" = "closed" ] && [ "$PR_MERGED" = "true" ]; then
+              TITLE="🔀 <b>GITHUB PULL REQUEST MERGED</b>"
+            else
+              TITLE="📌 <b>GITHUB PULL REQUEST ($PR_ACTION)</b>"
+            fi
+            DETAIL="💬 <b>Judul PR:</b> ${PR_TITLE}%0A🔗 <a href='${PR_URL}'>Lihat Pull Request</a>"
+          else
+            TITLE="🚀 <b>GITHUB PUSH</b>"
+            DETAIL="💬 <b>Commit:</b> ${COMMIT_MSG}%0A🔗 <a href='${COMPARE_URL}'>Lihat Perubahan di GitHub</a>"
+          fi
+
+          TEXT="${TITLE}%0A━━━━━━━━━━━━━━━━━━━━━━%0A📦 <b>Repo:</b> <code>${REPO_NAME}</code>%0A🌿 <b>Branch:</b> <code>${REF_NAME}</code>%0A👤 <b>Username GitHub:</b> <b>@${ACTOR}</b>%0A${DETAIL}"
+
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TELEGRAM_CHAT_ID}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" \
+            -d "text=${TEXT}" > /dev/null
